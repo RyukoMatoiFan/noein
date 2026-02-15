@@ -26,6 +26,7 @@ let useVideoPlayback = true; // Use HTML5 video for smooth playback
 let isMuted = true; // Sound off by default
 let notificationMessage = '';
 let notificationTimeout = null;
+let requestedFrame = null;
 
 async function handleFrameChange(event) {
     const newFrame = event.detail;
@@ -37,12 +38,20 @@ async function handleFrameChange(event) {
 
 async function loadCurrentFrame(frameNum) {
     if (!$currentVideo) return;
+    requestedFrame = frameNum;
 
     try {
         const frame = await GetFrame($currentVideo.id, frameNum);
         currentFrameImage = frame.imageData;
     } catch (error) {
         console.error('Failed to load frame:', error);
+    }
+}
+
+$: if ($currentVideo && !$isPlaying && !isScrubbing && $currentFrame !== requestedFrame) {
+    loadCurrentFrame($currentFrame);
+    if (videoElement && useVideoPlayback) {
+        videoElement.currentTime = $currentFrame / $currentVideo.frameRate;
     }
 }
 
@@ -762,9 +771,13 @@ function formatTimecode(frame, frameRate) {
 
 .image-container {
     position: relative;
-    display: inline-block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     max-width: 100%;
     max-height: 100%;
+    width: 100%;
+    height: 100%;
 }
 
 .frame-image {

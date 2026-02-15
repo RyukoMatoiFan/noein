@@ -21,6 +21,32 @@ func NewFFmpegService(ffmpegPath string) *FFmpegService {
 	}
 }
 
+func (f *FFmpegService) ExtractAudioWav(inputPath string, outputWavPath string) error {
+	cmd := exec.Command(
+		f.ffmpegPath,
+		"-y",
+		"-i", inputPath,
+		"-vn",
+		"-ac", "1",
+		"-ar", "16000",
+		"-c:a", "pcm_s16le",
+		outputWavPath,
+	)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+	}
+
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg audio extract failed: %w (stderr: %s)", err, errBuf.String())
+	}
+
+	return nil
+}
+
 // ExtractFrame extracts a single frame at the specified frame number
 func (f *FFmpegService) ExtractFrame(videoPath string, frameNumber int64, frameRate float64) ([]byte, error) {
 	// Calculate timestamp from frame number

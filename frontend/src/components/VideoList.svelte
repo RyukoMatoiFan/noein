@@ -2,15 +2,43 @@
 import { onMount } from 'svelte';
 import { videoList, currentVideo, currentFrame, isPlaying } from '../stores/videoStore.js';
 import { selectedVideos } from '../stores/projectStore.js';
-import { SelectFolder, LoadVideoFolder, SetCurrentVideo, ClearEditStack, ClearMarks } from '../../wailsjs/go/app/App.js';
+import { SelectFolder, LoadVideoFolder, SelectVideoFile, LoadVideoFile, SetCurrentVideo, ClearEditStack, ClearMarks } from '../../wailsjs/go/app/App.js';
 
 let selectedCount = 0;
 
 // LocalStorage keys for persistence
 const STORAGE_KEYS = {
-    LAST_FOLDER: 'noein_last_folder',
-    LAST_VIDEO_ID: 'noein_last_video_id'
+    LAST_VIDEO_ID: 'noein_last_video_id',
+    RECENT_ITEMS: 'noein_recent_items'
 };
+
+const MAX_RECENT = 5;
+
+// Recent items: { type: 'folder'|'file', path: string, label: string }
+let recentItems = [];
+
+function loadRecentItems() {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEYS.RECENT_ITEMS);
+        recentItems = raw ? JSON.parse(raw) : [];
+    } catch {
+        recentItems = [];
+    }
+}
+
+function addRecentItem(type, path) {
+    const label = path.split(/[/\\]/).pop() || path;
+    recentItems = [
+        { type, path, label },
+        ...recentItems.filter(r => r.path !== path)
+    ].slice(0, MAX_RECENT);
+    localStorage.setItem(STORAGE_KEYS.RECENT_ITEMS, JSON.stringify(recentItems));
+}
+
+function removeRecentItem(path) {
+    recentItems = recentItems.filter(r => r.path !== path);
+    localStorage.setItem(STORAGE_KEYS.RECENT_ITEMS, JSON.stringify(recentItems));
+}
 
 // Subscribe to selectedVideos to update count
 selectedVideos.subscribe(set => {
@@ -66,58 +94,63 @@ async function selectVideo(video) {
     }
 }
 
+async function clearAndLoad() {
+    selectedVideos.set(new Set());
+    try {
+        await ClearEditStack();
+        await ClearMarks();
+    } catch (error) {
+        console.error('Failed to clear state:', error);
+    }
+}
+
 async function handleLoadFolder() {
     try {
         const folderPath = await SelectFolder();
         if (folderPath) {
-            // Clear all selections, edit stack, and marks before loading new folder
-            selectedVideos.set(new Set());
-
-            try {
-                await ClearEditStack();
-                await ClearMarks();
-            } catch (error) {
-                console.error('Failed to clear state:', error);
-            }
-
+            await clearAndLoad();
             const videos = await LoadVideoFolder(folderPath);
             videoList.set(videos || []);
-
-            // Save last folder path
-            localStorage.setItem(STORAGE_KEYS.LAST_FOLDER, folderPath);
+            addRecentItem('folder', folderPath);
         }
     } catch (error) {
         console.error('Failed to load folder:', error);
     }
 }
 
-async function loadFolderByPath(folderPath) {
+async function handleLoadFile() {
     try {
-        const videos = await LoadVideoFolder(folderPath);
-        videoList.set(videos || []);
-        return videos;
+        const filePath = await SelectVideoFile();
+        if (filePath) {
+            await clearAndLoad();
+            const videos = await LoadVideoFile(filePath);
+            videoList.set(videos || []);
+            addRecentItem('file', filePath);
+        }
     } catch (error) {
-        console.error('Failed to load folder:', error);
-        return null;
+        console.error('Failed to load file:', error);
     }
 }
 
-// Auto-load last folder and video on mount
-onMount(async () => {
-    const lastFolder = localStorage.getItem(STORAGE_KEYS.LAST_FOLDER);
-    const lastVideoId = localStorage.getItem(STORAGE_KEYS.LAST_VIDEO_ID);
-
-    if (lastFolder) {
-        const videos = await loadFolderByPath(lastFolder);
-
-        // If we have a last video ID, try to select it
-        if (videos && lastVideoId) {
-            const lastVideo = videos.find(v => v.id === lastVideoId);
-            if (lastVideo) {
-                await selectVideo(lastVideo);
-            }
+async function loadRecentEntry(item) {
+    try {
+        await clearAndLoad();
+        let videos;
+        if (item.type === 'file') {
+            videos = await LoadVideoFile(item.path);
+        } else {
+            videos = await LoadVideoFolder(item.path);
         }
+        videoList.set(videos || []);
+        addRecentItem(item.type, item.path);
+    } catch (error) {
+        console.error('Failed to load recent item:', error);
+        removeRecentItem(item.path);
     }
+}
+
+onMount(() => {
+    loadRecentItems();
 });
 
 function formatDuration(seconds) {
@@ -141,9 +174,14 @@ function formatFrameRate(fps) {
 <div class="video-list">
     <div class="header">
         <h2>Videos</h2>
-        <button class="load-button" on:click={handleLoadFolder}>
-            Load Folder
-        </button>
+        <div class="load-buttons">
+            <button class="load-button" on:click={handleLoadFolder}>
+                Load Folder
+            </button>
+            <button class="load-button load-file" on:click={handleLoadFile}>
+                Load File
+            </button>
+        </div>
         {#if $videoList.length > 0}
             <div class="selection-controls">
                 <button class="selection-btn" on:click={selectAll} title="Select all videos">
@@ -164,8 +202,21 @@ function formatFrameRate(fps) {
     <div class="list-container">
         {#if $videoList.length === 0}
             <div class="empty-state">
-                <p>No videos loaded</p>
-                <p class="hint">Click "Load Folder" to begin</p>
+                {#if recentItems.length > 0}
+                    <p class="recent-title">Recent</p>
+                    <div class="recent-list">
+                        {#each recentItems as item (item.path)}
+                            <button class="recent-item" on:click={() => loadRecentEntry(item)} title={item.path}>
+                                <span class="recent-icon">{item.type === 'folder' ? '📁' : '🎬'}</span>
+                                <span class="recent-label">{item.label}</span>
+                                <button class="recent-remove" on:click|stopPropagation={() => removeRecentItem(item.path)} title="Remove">×</button>
+                            </button>
+                        {/each}
+                    </div>
+                {:else}
+                    <p>No videos loaded</p>
+                    <p class="hint">Load a folder or file to begin</p>
+                {/if}
             </div>
         {:else}
             <div class="video-items">
@@ -231,8 +282,13 @@ function formatFrameRate(fps) {
     font-weight: 600;
 }
 
+.load-buttons {
+    display: flex;
+    gap: 6px;
+}
+
 .load-button {
-    width: 100%;
+    flex: 1;
     padding: 10px 16px;
     background: var(--accent-blue);
     color: var(--bg-primary);
@@ -243,6 +299,88 @@ function formatFrameRate(fps) {
 
 .load-button:hover {
     background: #50b4eb;
+}
+
+.load-button.load-file {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+.load-button.load-file:hover {
+    background: #333;
+    border-color: #555;
+}
+
+.recent-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.recent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-align: left;
+}
+
+.recent-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    width: 100%;
+    text-align: left;
+    color: var(--text-primary);
+}
+
+.recent-item:hover {
+    background: #2a2a2a;
+    border-color: #555;
+}
+
+.recent-icon {
+    flex-shrink: 0;
+    font-size: 14px;
+}
+
+.recent-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+}
+
+.recent-remove {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    padding: 0;
+}
+
+.recent-remove:hover {
+    background: rgba(255, 100, 100, 0.2);
+    color: #ff6b6b;
 }
 
 .selection-controls {

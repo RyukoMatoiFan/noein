@@ -10,6 +10,8 @@ import AdjustmentsTool from './AdjustmentsTool.svelte';
 import AdvancedTool from './AdvancedTool.svelte';
 import FormatConversionTool from './FormatConversionTool.svelte';
 import FileManagementTool from './FileManagementTool.svelte';
+import SpeechTool from './SpeechTool.svelte';
+import CaptionTool from './CaptionTool.svelte';
 import { accordionExpanded } from '../stores/uiStore.js';
 import { LoadPanelStates, SavePanelStates } from '../../wailsjs/go/app/App.js';
 
@@ -22,6 +24,8 @@ let adjustmentsExpanded = false;
 let advancedExpanded = false;
 let formatExpanded = false;
 let fileManagementExpanded = false;
+let speechExpanded = false;
+let captionExpanded = false;
 let infoExpanded = false;
 let isLoading = true; // Prevent saving during initial load
 
@@ -39,6 +43,8 @@ onMount(async () => {
             advancedExpanded = states.advanced || false;
             formatExpanded = states.format || false;
             fileManagementExpanded = states.fileManagement || false;
+            speechExpanded = states.speech || false;
+            captionExpanded = states.caption || false;
             infoExpanded = states.info || false;
         }
     } catch (error) {
@@ -63,6 +69,8 @@ async function savePanelStates() {
             advanced: advancedExpanded,
             format: formatExpanded,
             fileManagement: fileManagementExpanded,
+            speech: speechExpanded,
+            caption: captionExpanded,
             info: infoExpanded
         };
         await SavePanelStates(states);
@@ -80,6 +88,8 @@ function expandAll() {
     advancedExpanded = true;
     formatExpanded = true;
     fileManagementExpanded = true;
+    speechExpanded = true;
+    captionExpanded = true;
     infoExpanded = true;
     savePanelStates();
 }
@@ -93,6 +103,8 @@ function collapseAll() {
     advancedExpanded = false;
     formatExpanded = false;
     fileManagementExpanded = false;
+    speechExpanded = false;
+    captionExpanded = false;
     infoExpanded = false;
     savePanelStates();
 }
@@ -107,6 +119,8 @@ $: accordionExpanded.set({
     advanced: advancedExpanded,
     format: formatExpanded,
     fileManagement: fileManagementExpanded,
+    speech: speechExpanded,
+    caption: captionExpanded,
     info: infoExpanded
 });
 
@@ -160,6 +174,14 @@ $: if (!isLoading) {
 
         <AccordionGroup title="File Management" bind:expanded={fileManagementExpanded}>
             <FileManagementTool />
+        </AccordionGroup>
+
+        <AccordionGroup title="Speech (Whisper)" bind:expanded={speechExpanded}>
+            <SpeechTool />
+        </AccordionGroup>
+
+        <AccordionGroup title="Captioner (Vision LLM)" bind:expanded={captionExpanded}>
+            <CaptionTool />
         </AccordionGroup>
 
         <AccordionGroup title="Edit Stack & Save" bind:expanded={historyExpanded}>

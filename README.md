@@ -1,10 +1,14 @@
 # Noein
 
-Frame-perfect video editor for Windows. Built for dataset preparation and precise video editing.
+AI-powered frame-perfect video editor for Windows.  
+Built for dataset preparation and precise video editing.
 
 ## Features
 
 - **Frame-accurate navigation** with keyboard shortcuts (±1, ±10 frame jumps)
+- **Speech fragment detection (Whisper)** - find speech segments, jump, and extract clips
+- **Whisper transcript export** - export SRT/VTT transcripts and dataset.jsonl manifests for speech clips
+- **Ollama labeling (optional)** - generate short labels/tags for speech fragments and include them in dataset.jsonl
 - **Batch processing** with Select All/Deselect All and batch save checkbox
 - **Visual crop selection** - draw regions directly on video
 - **Auto-resume** - loads last folder and video on startup
@@ -21,7 +25,16 @@ Frame-perfect video editor for Windows. Built for dataset preparation and precis
 
 - Windows 10/11
 - FFmpeg (auto-downloaded by launcher or place in PATH)
+- Optional: Whisper speech detection can auto-download `whisper-cli.exe` + a `.bin` model into a local `noein/` folder next to where the app is started, or you can supply them manually
+- Optional: Ollama running locally (default `http://localhost:11434`) for auto label/tag generation
 - For building: Go 1.21+, Node.js 18+
+
+## Runtime Downloads
+
+When you use auto-download features (FFmpeg via launcher, Whisper via UI), Noein stores downloaded files under:
+
+- `./noein/` (created next to the current working directory / start folder)
+- Fallbacks: next to the executable, then `%USERPROFILE%\\noein\\`
 
 ## Quick Start
 

@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"noein/app/ffmpeg"
+	"noein/app/llm"
 	"noein/app/models"
+	"noein/app/speech"
 	"noein/app/video"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -21,6 +25,7 @@ type App struct {
 	cutter         *video.Cutter
 	projectState   *models.ProjectState
 	videoServer    *VideoFileServer
+	ffmpegSvc      *ffmpeg.FFmpegService
 }
 
 func NewApp() *App {
@@ -46,6 +51,7 @@ func (a *App) Startup(ctx context.Context) {
 	// Initialize FFmpeg services
 	probe := ffmpeg.NewProbeService(ffprobePath)
 	ffmpegSvc := ffmpeg.NewFFmpegService(ffmpegPath)
+	a.ffmpegSvc = ffmpegSvc
 
 	// Initialize video services
 	a.videoManager = video.NewVideoManager(probe)
@@ -59,6 +65,22 @@ func (a *App) SelectFolder() (string, error) {
 		Title: "Select Video Folder",
 	})
 	return folder, err
+}
+
+// SelectVideoFile shows a file selection dialog for a single video file
+func (a *App) SelectVideoFile() (string, error) {
+	file, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select Video File",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Video Files", Pattern: "*.mp4;*.mov;*.avi;*.mkv;*.webm"},
+		},
+	})
+	return file, err
+}
+
+// LoadVideoFile loads a single video file and returns it as a one-element list
+func (a *App) LoadVideoFile(filePath string) ([]*models.VideoFile, error) {
+	return a.videoManager.LoadFile(filePath)
 }
 
 // GetVideoURL returns a URL for serving the video file
@@ -983,6 +1005,8 @@ func (a *App) LoadPanelStates() (map[string]bool, error) {
 			"advanced":       false,
 			"format":         false,
 			"fileManagement": false,
+			"speech":         false,
+			"caption":        false,
 			"info":           false,
 		}, nil
 	}
@@ -1112,6 +1136,34 @@ func (a *App) SelectOutputFile() (string, error) {
 	return file, err
 }
 
+func (a *App) SelectWhisperExecutable() (string, error) {
+	file, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select Whisper CLI Executable",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Executable", Pattern: "*.exe"},
+		},
+	})
+	return file, err
+}
+
+func (a *App) SelectWhisperModel() (string, error) {
+	file, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select Whisper Model (.bin)",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Whisper Model", Pattern: "*.bin"},
+		},
+	})
+	return file, err
+}
+
+func (a *App) EnsureWhisperCLI() (string, error) {
+	return speech.EnsureWhisperCLI()
+}
+
+func (a *App) EnsureWhisperModel(modelName string) (string, error) {
+	return speech.EnsureWhisperModel(modelName)
+}
+
 // SelectOutputDirectory shows a directory selection dialog for batch export
 func (a *App) SelectOutputDirectory() (string, error) {
 	folder, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
@@ -1124,6 +1176,350 @@ func (a *App) SelectOutputDirectory() (string, error) {
 func (a *App) ExportSegment(videoID string, inFrame, outFrame int64, outputPath string) error {
 	// Default to re-encode for frame-perfect cutting
 	return a.cutter.CutVideo(videoID, inFrame, outFrame, outputPath, true)
+}
+
+func (a *App) DetectSpeechFragments(videoID string, whisperPath string, modelPath string, mergeGapMs int, minFragmentMs int) ([]models.SpeechFragment, error) {
+	video, err := a.videoManager.GetVideo(videoID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get video: %w", err)
+	}
+
+	if strings.TrimSpace(whisperPath) == "" {
+		whisperPath = detectWhisperPath()
+		if whisperPath == "whisper-cli" {
+			if installed, err := speech.EnsureWhisperCLI(); err == nil && strings.TrimSpace(installed) != "" {
+				whisperPath = installed
+			}
+		}
+	}
+
+	runner := &speech.WhisperRunner{
+		WhisperPath: whisperPath,
+		ModelPath:   modelPath,
+	}
+
+	return runner.DetectSpeechFragments(video.Path, video.FrameRate, mergeGapMs, minFragmentMs, a.ffmpegSvc.ExtractAudioWav)
+}
+
+func (a *App) ExportSpeechFragments(videoID string, fragments []models.SpeechFragment, outputDir string) ([]models.BatchResult, error) {
+	video, err := a.videoManager.GetVideo(videoID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get video: %w", err)
+	}
+	if strings.TrimSpace(outputDir) == "" {
+		return nil, fmt.Errorf("output directory is required")
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output dir: %w", err)
+	}
+
+	ext := filepath.Ext(video.Path)
+	base := strings.TrimSuffix(filepath.Base(video.Path), ext)
+	base = sanitizeFileName(base)
+
+	results := make([]models.BatchResult, len(fragments))
+	for i, f := range fragments {
+		outputName := fmt.Sprintf("%s_speech_%03d%s", base, i+1, ext)
+		outputPath := filepath.Join(outputDir, outputName)
+
+		result := models.BatchResult{
+			VideoID: videoID,
+			Success: true,
+			Output:  outputPath,
+			Error:   "",
+		}
+
+		if err := a.cutter.CutVideo(videoID, f.InFrame, f.OutFrame, outputPath, true); err != nil {
+			result.Success = false
+			result.Error = err.Error()
+			result.Output = ""
+		}
+		results[i] = result
+	}
+
+	return results, nil
+}
+
+func (a *App) ExportSpeechDataset(videoID string, fragments []models.SpeechFragment, outputDir string, manifestName string) ([]models.BatchResult, error) {
+	if strings.TrimSpace(manifestName) == "" {
+		manifestName = "dataset.jsonl"
+	}
+	if strings.TrimSpace(outputDir) == "" {
+		return nil, fmt.Errorf("output directory is required")
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output dir: %w", err)
+	}
+
+	video, err := a.videoManager.GetVideo(videoID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get video: %w", err)
+	}
+
+	ext := filepath.Ext(video.Path)
+	base := strings.TrimSuffix(filepath.Base(video.Path), ext)
+	base = sanitizeFileName(base)
+
+	type datasetItem struct {
+		VideoID         string  `json:"videoId"`
+		SourceVideoPath string  `json:"sourceVideoPath"`
+		ClipPath        string  `json:"clipPath"`
+		StartSec        float64 `json:"startSec"`
+		EndSec          float64 `json:"endSec"`
+		InFrame         int64   `json:"inFrame"`
+		OutFrame        int64   `json:"outFrame"`
+		Text            string  `json:"text"`
+		Label           string  `json:"label,omitempty"`
+		Tags            []string `json:"tags,omitempty"`
+		Success         bool    `json:"success"`
+		Error           string  `json:"error,omitempty"`
+	}
+
+	manifestPath := filepath.Join(outputDir, manifestName)
+	manifestFile, err := os.Create(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create manifest: %w", err)
+	}
+	defer manifestFile.Close()
+
+	results := make([]models.BatchResult, len(fragments))
+	enc := json.NewEncoder(manifestFile)
+
+	for i, f := range fragments {
+		outputName := fmt.Sprintf("%s_speech_%03d%s", base, i+1, ext)
+		outputPath := filepath.Join(outputDir, outputName)
+
+		result := models.BatchResult{
+			VideoID: videoID,
+			Success: true,
+			Output:  outputPath,
+			Error:   "",
+		}
+
+		item := datasetItem{
+			VideoID:         videoID,
+			SourceVideoPath: video.Path,
+			ClipPath:        outputPath,
+			StartSec:        f.StartSec,
+			EndSec:          f.EndSec,
+			InFrame:         f.InFrame,
+			OutFrame:        f.OutFrame,
+			Text:            f.Text,
+			Label:           f.Label,
+			Tags:            f.Tags,
+			Success:         true,
+		}
+
+		if err := a.cutter.CutVideo(videoID, f.InFrame, f.OutFrame, outputPath, true); err != nil {
+			result.Success = false
+			result.Error = err.Error()
+			result.Output = ""
+			item.Success = false
+			item.Error = err.Error()
+			item.ClipPath = ""
+		}
+
+		if err := enc.Encode(item); err != nil {
+			return nil, fmt.Errorf("failed to write manifest: %w", err)
+		}
+
+		results[i] = result
+	}
+
+	return results, nil
+}
+
+func (a *App) ExportWhisperTranscript(videoID string, whisperPath string, modelPath string, format string, outputDir string) (string, error) {
+	video, err := a.videoManager.GetVideo(videoID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get video: %w", err)
+	}
+	if strings.TrimSpace(outputDir) == "" {
+		return "", fmt.Errorf("output directory is required")
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create output dir: %w", err)
+	}
+
+	if strings.TrimSpace(whisperPath) == "" {
+		whisperPath = detectWhisperPath()
+		if whisperPath == "whisper-cli" {
+			if installed, err := speech.EnsureWhisperCLI(); err == nil && strings.TrimSpace(installed) != "" {
+				whisperPath = installed
+			}
+		}
+	}
+
+	runner := &speech.WhisperRunner{
+		WhisperPath: whisperPath,
+		ModelPath:   modelPath,
+	}
+
+	segments, err := runner.TranscribeSegments(video.Path, a.ffmpegSvc.ExtractAudioWav)
+	if err != nil {
+		return "", err
+	}
+
+	data, ext, err := speech.RenderTranscript(format, segments)
+	if err != nil {
+		return "", err
+	}
+
+	videoExt := filepath.Ext(video.Path)
+	base := strings.TrimSuffix(filepath.Base(video.Path), videoExt)
+	base = sanitizeFileName(base)
+
+	outPath := filepath.Join(outputDir, fmt.Sprintf("%s.%s", base, ext))
+	if err := os.WriteFile(outPath, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write transcript: %w", err)
+	}
+	return outPath, nil
+}
+
+// CaptionVideo extracts N evenly-spaced frames from a video and sends them
+// to an OpenAI-compatible vision LLM for captioning.
+func (a *App) CaptionVideo(videoID, apiBase, apiKey, model, prompt string, numFrames int) (string, error) {
+	if numFrames <= 0 {
+		numFrames = 3
+	}
+	if numFrames > 16 {
+		numFrames = 16
+	}
+
+	video, err := a.videoManager.GetVideo(videoID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get video: %w", err)
+	}
+
+	totalFrames := video.TotalFrames
+	if totalFrames <= 0 {
+		return "", fmt.Errorf("video has no frames")
+	}
+
+	// Calculate evenly-spaced frame numbers
+	frameNumbers := make([]int64, numFrames)
+	if numFrames == 1 {
+		frameNumbers[0] = totalFrames / 2
+	} else {
+		for i := 0; i < numFrames; i++ {
+			frameNumbers[i] = int64(float64(i) * float64(totalFrames-1) / float64(numFrames-1))
+		}
+	}
+
+	// Extract frames as base64
+	images := make([]string, 0, numFrames)
+	for _, fn := range frameNumbers {
+		frame, err := a.frameExtractor.GetFrame(videoID, fn)
+		if err != nil {
+			return "", fmt.Errorf("failed to extract frame %d: %w", fn, err)
+		}
+		// Strip data URI prefix if present
+		img := frame.ImageData
+		if idx := strings.Index(img, ","); idx >= 0 {
+			img = img[idx+1:]
+		}
+		images = append(images, img)
+	}
+
+	client := &llm.VisionClient{
+		BaseURL: apiBase,
+		APIKey:  apiKey,
+		Model:   model,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	return client.CaptionFromImages(ctx, images, prompt)
+}
+
+func (a *App) OllamaListModels(baseURL string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client := &llm.OllamaClient{BaseURL: baseURL}
+	return client.ListModels(ctx)
+}
+
+func (a *App) OllamaAnnotateSpeechFragments(fragments []models.SpeechFragment, baseURL string, model string) ([]models.SpeechFragment, error) {
+	if len(fragments) == 0 {
+		return fragments, nil
+	}
+
+	client := &llm.OllamaClient{BaseURL: baseURL, Model: model}
+
+	type job struct {
+		Index int
+		Text  string
+	}
+	type res struct {
+		Index int
+		Out   llm.CaptionTags
+		Err   error
+	}
+
+	jobs := make(chan job)
+	results := make(chan res, len(fragments))
+
+	workerCount := 2
+	if len(fragments) < workerCount {
+		workerCount = len(fragments)
+	}
+
+	promptFor := func(t string) string {
+		return "You label short speech transcripts for a video dataset.\n" +
+			"Return STRICT JSON only, no extra text.\n" +
+			"{\"label\":\"...\",\"tags\":[\"tag1\",\"tag2\"]}\n" +
+			"Constraints:\n" +
+			"- label: 3-12 words, lowercase, no punctuation\n" +
+			"- tags: 0-8 short lowercase tags\n" +
+			"Transcript:\n" + t
+	}
+
+	ctx := context.Background()
+	for w := 0; w < workerCount; w++ {
+		go func() {
+			for j := range jobs {
+				outText, err := client.Generate(ctx, promptFor(j.Text))
+				if err != nil {
+					results <- res{Index: j.Index, Err: err}
+					continue
+				}
+				parsed, ok := llm.ParseCaptionTags(outText)
+				if !ok {
+					results <- res{Index: j.Index, Err: fmt.Errorf("failed to parse ollama output")}
+					continue
+				}
+				results <- res{Index: j.Index, Out: parsed}
+			}
+		}()
+	}
+
+	go func() {
+		for i, f := range fragments {
+			jobs <- job{Index: i, Text: strings.TrimSpace(f.Text)}
+		}
+		close(jobs)
+	}()
+
+	out := make([]models.SpeechFragment, len(fragments))
+	copy(out, fragments)
+
+	var firstErr error
+	for i := 0; i < len(fragments); i++ {
+		r := <-results
+		if r.Err != nil && firstErr == nil {
+			firstErr = r.Err
+			continue
+		}
+		out[r.Index].Label = r.Out.Label
+		out[r.Index].Tags = r.Out.Tags
+	}
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
 }
 
 // detectFFmpegPath detects the location of ffmpeg.exe
@@ -1140,6 +1536,55 @@ func detectFFmpegPath() string {
 
 	// Fall back to system PATH
 	return "ffmpeg"
+}
+
+func detectWhisperPath() string {
+	if baseDir, err := speech.WhisperInstallDir(); err == nil {
+		candidate := filepath.Join(baseDir, "whisper-bin-x64", "Release", "whisper-cli.exe")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	exePath, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exePath)
+		candidates := []string{
+			filepath.Join(exeDir, "whisper-cli.exe"),
+			filepath.Join(exeDir, "whisper.exe"),
+			filepath.Join(exeDir, "main.exe"),
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				return c
+			}
+		}
+	}
+	return "whisper-cli"
+}
+
+func sanitizeFileName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "output"
+	}
+	replacer := strings.NewReplacer(
+		"\\", "_",
+		"/", "_",
+		":", "_",
+		"*", "_",
+		"?", "_",
+		"\"", "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+	)
+	name = replacer.Replace(name)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "output"
+	}
+	return name
 }
 
 // detectFFprobePath detects the location of ffprobe.exe

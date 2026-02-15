@@ -113,6 +113,26 @@ func (vm *VideoManager) LoadFolder(folderPath string) ([]*models.VideoFile, erro
 	return results, nil
 }
 
+// LoadFile loads a single video file and returns it as a slice
+func (vm *VideoManager) LoadFile(filePath string) ([]*models.VideoFile, error) {
+	video, err := vm.probe.GetVideoMetadata(filePath)
+	if err != nil {
+		video = &models.VideoFile{
+			ID:   generateIDFromPath(filePath),
+			Path: filePath,
+			Name: filepath.Base(filePath),
+		}
+	} else {
+		video.ID = generateIDFromPath(filePath)
+	}
+
+	vm.mu.Lock()
+	vm.videos[video.ID] = video
+	vm.mu.Unlock()
+
+	return []*models.VideoFile{video}, nil
+}
+
 // generateIDFromPath creates a simple ID from file path
 func generateIDFromPath(path string) string {
 	// Use a simple hash of the path as ID
