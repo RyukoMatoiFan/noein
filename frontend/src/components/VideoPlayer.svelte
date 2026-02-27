@@ -2,7 +2,7 @@
 import { onMount, onDestroy } from 'svelte';
 import Timeline from './Timeline.svelte';
 import CropSelector from './CropSelector.svelte';
-import { currentVideo, currentFrame, isPlaying } from '../stores/videoStore.js';
+import { currentVideo, currentFrame, isPlaying, playbackEndFrame } from '../stores/videoStore.js';
 import { inPoint, outPoint, cropEnabled, cropClearSignal, skipFrameReset, frameBeforeEdits } from '../stores/projectStore.js';
 import { SetInPoint, SetOutPoint, GetFrame, GetVideoURL, AddTrimExternal, AddTrimInternal, AddCropOperation, SaveToEditedFolder, UndoLastEdit, SetCurrentVideo, GetProjectState, GetVideoMetadata } from '../../wailsjs/go/app/App.js';
 
@@ -131,7 +131,7 @@ function togglePlayback() {
 }
 
 async function startPlayback() {
-    if (!$currentVideo || $isPlaying) return;
+    if (!$currentVideo) return;
 
     // Disable crop mode when starting playback
     if ($cropEnabled) {
@@ -185,8 +185,9 @@ async function startPlayback() {
                     const currentFrameNum = Math.floor(videoElement.currentTime * $currentVideo.frameRate);
                     currentFrame.set(currentFrameNum);
 
-                    // Stop at end
-                    if (currentFrameNum >= $currentVideo.totalFrames - 1) {
+                    // Stop at playback end frame (range playback) or video end
+                    const endFrame = $playbackEndFrame !== null ? $playbackEndFrame : $currentVideo.totalFrames - 1;
+                    if (currentFrameNum >= endFrame) {
                         stopPlayback();
                     }
                 }
@@ -200,6 +201,7 @@ async function startPlayback() {
 
 function stopPlayback() {
     isPlaying.set(false);
+    playbackEndFrame.set(null);
 
     // Pause HTML5 video if playing
     if (videoElement && useVideoPlayback) {
@@ -221,7 +223,10 @@ function stopPlayback() {
     }
 }
 
-// Watch isPlaying store and stop playback if it becomes false externally
+// Expose startPlayback globally so other components can trigger range playback
+$: if (typeof window !== 'undefined') {
+    window.__noeinStartPlayback = startPlayback;
+}
 $: if (!$isPlaying && playbackInterval) {
     clearInterval(playbackInterval);
     playbackInterval = null;

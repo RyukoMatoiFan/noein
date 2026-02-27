@@ -1,6 +1,7 @@
 <script>
-import { currentVideo, currentFrame, isPlaying, videoList } from '../stores/videoStore.js';
-import { DetectSpeechFragments, ExportSegment, ExportSpeechDataset, ExportWhisperTranscript, EnsureWhisperCLI, EnsureWhisperModel, OllamaAnnotateSpeechFragments, OllamaListModels, SelectOutputDirectory, SelectOutputFile, SelectWhisperExecutable, SelectWhisperModel } from '../../wailsjs/go/app/App.js';
+import { currentVideo, currentFrame, isPlaying, playbackEndFrame, videoList } from '../stores/videoStore.js';
+import { inPoint, outPoint } from '../stores/projectStore.js';
+import { DetectSpeechFragments, ExportSegment, ExportSpeechDataset, ExportWhisperTranscript, EnsureWhisperCLI, EnsureWhisperModel, OllamaAnnotateSpeechFragments, OllamaListModels, SelectOutputDirectory, SelectOutputFile, SelectWhisperExecutable, SelectWhisperModel, SetInPoint, SetOutPoint } from '../../wailsjs/go/app/App.js';
 
 let fragments = [];
 let isAnalyzing = false;
@@ -20,6 +21,11 @@ let modelName = localStorage.getItem('noein.whisperModelName') || 'tiny.en-q5_1'
 let manifestName = localStorage.getItem('noein.whisperDatasetManifestName') || 'dataset.jsonl';
 let mergeGapMs = Number(localStorage.getItem('noein.whisperMergeGapMs') || '400');
 let minFragmentMs = Number(localStorage.getItem('noein.whisperMinFragmentMs') || '800');
+let splitOnSilence = localStorage.getItem('noein.whisperSplitOnSilence') !== 'false';
+let silenceDurationMs = Number(localStorage.getItem('noein.whisperSilenceDurationMs') || '300');
+// Reset any stale threshold; FFmpeg default is -60dB
+let _storedThresh = localStorage.getItem('noein.whisperSilenceThresholdDb');
+let silenceThresholdDb = (_storedThresh === null || _storedThresh === '-20' || _storedThresh === '-30') ? -50 : Number(_storedThresh);
 
 let ollamaBaseURL = localStorage.getItem('noein.ollamaBaseURL') || 'http://localhost:11434';
 let ollamaModel = localStorage.getItem('noein.ollamaModel') || '';
@@ -33,6 +39,9 @@ $: localStorage.setItem('noein.whisperModelName', modelName || '');
 $: localStorage.setItem('noein.whisperDatasetManifestName', manifestName || '');
 $: localStorage.setItem('noein.whisperMergeGapMs', String(mergeGapMs || 0));
 $: localStorage.setItem('noein.whisperMinFragmentMs', String(minFragmentMs || 0));
+$: localStorage.setItem('noein.whisperSplitOnSilence', String(splitOnSilence));
+$: localStorage.setItem('noein.whisperSilenceDurationMs', String(silenceDurationMs || 0));
+$: localStorage.setItem('noein.whisperSilenceThresholdDb', String(silenceThresholdDb || -30));
 
 function formatTime(seconds) {
     const s = Math.max(0, seconds || 0);
@@ -82,7 +91,7 @@ async function analyze() {
     fragments = [];
     isAnalyzing = true;
     try {
-        fragments = await DetectSpeechFragments($currentVideo.id, whisperPath, modelPath, mergeGapMs, minFragmentMs);
+        fragments = await DetectSpeechFragments($currentVideo.id, whisperPath, modelPath, mergeGapMs, minFragmentMs, splitOnSilence, silenceDurationMs, silenceThresholdDb);
     } catch (e) {
         errorMessage = e?.message || String(e);
     } finally {
@@ -90,10 +99,30 @@ async function analyze() {
     }
 }
 
-function jumpTo(fragment) {
+async function jumpTo(fragment) {
     if (!fragment) return;
     isPlaying.set(false);
     currentFrame.set(fragment.inFrame || 0);
+    // Set IN/OUT marks to fragment boundaries
+    await SetInPoint(fragment.inFrame || 0);
+    inPoint.set(fragment.inFrame || 0);
+    await SetOutPoint(fragment.outFrame || 0);
+    outPoint.set(fragment.outFrame || 0);
+}
+
+function playFragment(fragment) {
+    if (!fragment) return;
+    // Stop any current playback first
+    isPlaying.set(false);
+    // Jump to fragment start and set end frame
+    currentFrame.set(fragment.inFrame || 0);
+    playbackEndFrame.set(fragment.outFrame || 0);
+    // Small delay to let the frame seek settle, then trigger playback
+    setTimeout(() => {
+        if (window.__noeinStartPlayback) {
+            window.__noeinStartPlayback();
+        }
+    }, 100);
 }
 
 async function exportOne(fragment) {
@@ -190,7 +219,7 @@ async function batchExtractAll() {
 
             const result = { name: v.name, success: false, fragmentCount: 0, error: '' };
             try {
-                const frags = await DetectSpeechFragments(v.id, whisperPath, modelPath, mergeGapMs, minFragmentMs);
+                const frags = await DetectSpeechFragments(v.id, whisperPath, modelPath, mergeGapMs, minFragmentMs, splitOnSilence, silenceDurationMs, silenceThresholdDb);
                 result.fragmentCount = frags ? frags.length : 0;
 
                 if (frags && frags.length > 0) {
@@ -228,10 +257,14 @@ async function batchExtractAll() {
             {isDownloading ? 'Downloading…' : 'Auto-download Whisper + Model'}
         </button>
         <select class="select" bind:value={modelName} disabled={isDownloading}>
-            <option value="tiny.en-q5_1">tiny.en-q5_1 (fast, small)</option>
-            <option value="base.en">base.en</option>
-            <option value="small.en">small.en</option>
-            <option value="medium.en">medium.en</option>
+            <option value="tiny">tiny (multilingual, fast)</option>
+            <option value="tiny.en-q5_1">tiny.en-q5_1 (English, fast)</option>
+            <option value="base">base (multilingual)</option>
+            <option value="base.en">base.en (English)</option>
+            <option value="small">small (multilingual)</option>
+            <option value="small.en">small.en (English)</option>
+            <option value="medium">medium (multilingual, slow)</option>
+            <option value="medium.en">medium.en (English, slow)</option>
         </select>
     </div>
 
@@ -245,6 +278,26 @@ async function batchExtractAll() {
             <input type="number" min="0" step="50" bind:value={minFragmentMs} />
         </label>
     </div>
+
+    <div class="row">
+        <label class="checkbox-label">
+            <input type="checkbox" bind:checked={splitOnSilence} />
+            <span>Split on silence (pauses within speech)</span>
+        </label>
+    </div>
+
+    {#if splitOnSilence}
+    <div class="grid">
+        <label>
+            <div class="label">Min Silence (ms)</div>
+            <input type="number" min="50" step="50" bind:value={silenceDurationMs} />
+        </label>
+        <label>
+            <div class="label">Threshold (dB)</div>
+            <input type="number" max="-1" step="5" bind:value={silenceThresholdDb} />
+        </label>
+    </div>
+    {/if}
 
     <div class="row">
         <label class="manifest">
@@ -342,6 +395,7 @@ async function batchExtractAll() {
                     </div>
                     <div class="actions">
                         <button class="btn small" on:click={() => jumpTo(f)}>Jump</button>
+                        <button class="btn small" on:click={() => playFragment(f)}>Play</button>
                         <button class="btn small" on:click={() => exportOne(f)}>Extract</button>
                     </div>
                 </div>
@@ -383,6 +437,20 @@ input {
     border-radius: 4px;
     color: var(--text-primary);
     font-size: 13px;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: auto;
+    margin: 0;
 }
 
 .manifest {

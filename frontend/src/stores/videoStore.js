@@ -4,6 +4,7 @@ export const currentVideo = writable(null);
 export const videoList = writable([]);
 export const currentFrame = writable(0);
 export const isPlaying = writable(false);
+export const playbackEndFrame = writable(null); // When set, playback stops at this frame
 export const framePreview = writable(null);
 
 // Derived stores

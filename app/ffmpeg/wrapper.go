@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"noein/app/models"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"syscall"
 )
 
@@ -45,6 +47,66 @@ func (f *FFmpegService) ExtractAudioWav(inputPath string, outputWavPath string) 
 	}
 
 	return nil
+}
+
+// SilencePeriod represents a detected silence interval in the audio.
+type SilencePeriod struct {
+	StartSec float64
+	EndSec   float64
+}
+
+// DetectSilences runs FFmpeg silencedetect filter and returns silence periods.
+func (f *FFmpegService) DetectSilences(inputPath string, minSilenceDurationSec float64, silenceThresholdDb int) ([]SilencePeriod, error) {
+	if minSilenceDurationSec <= 0 {
+		minSilenceDurationSec = 0.3
+	}
+	if silenceThresholdDb >= 0 {
+		silenceThresholdDb = -50
+	}
+
+	af := fmt.Sprintf("silencedetect=noise=%ddB:d=%.3f", silenceThresholdDb, minSilenceDurationSec)
+	cmd := exec.Command(
+		f.ffmpegPath,
+		"-i", inputPath,
+		"-af", af,
+		"-f", "null",
+		"-",
+	)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+	}
+
+	var outBuf bytes.Buffer
+	var errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg silencedetect failed: %w (stderr: %s)", err, errBuf.String())
+	}
+
+	// silencedetect outputs to stderr
+	output := errBuf.String()
+	return parseSilenceDetectOutput(output), nil
+}
+
+var silenceStartRE = regexp.MustCompile(`silence_start:\s*([\d.]+)`)
+var silenceEndRE = regexp.MustCompile(`silence_end:\s*([\d.]+)`)
+
+func parseSilenceDetectOutput(output string) []SilencePeriod {
+	starts := silenceStartRE.FindAllStringSubmatch(output, -1)
+	ends := silenceEndRE.FindAllStringSubmatch(output, -1)
+
+	var periods []SilencePeriod
+	for i := 0; i < len(starts) && i < len(ends); i++ {
+		s, err1 := strconv.ParseFloat(starts[i][1], 64)
+		e, err2 := strconv.ParseFloat(ends[i][1], 64)
+		if err1 == nil && err2 == nil && e > s {
+			periods = append(periods, SilencePeriod{StartSec: s, EndSec: e})
+		}
+	}
+	return periods
 }
 
 // ExtractFrame extracts a single frame at the specified frame number

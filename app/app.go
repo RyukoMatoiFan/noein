@@ -1178,7 +1178,7 @@ func (a *App) ExportSegment(videoID string, inFrame, outFrame int64, outputPath 
 	return a.cutter.CutVideo(videoID, inFrame, outFrame, outputPath, true)
 }
 
-func (a *App) DetectSpeechFragments(videoID string, whisperPath string, modelPath string, mergeGapMs int, minFragmentMs int) ([]models.SpeechFragment, error) {
+func (a *App) DetectSpeechFragments(videoID string, whisperPath string, modelPath string, mergeGapMs int, minFragmentMs int, splitOnSilence bool, silenceDurationMs int, silenceThresholdDb int) ([]models.SpeechFragment, error) {
 	video, err := a.videoManager.GetVideo(videoID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get video: %w", err)
@@ -1198,7 +1198,7 @@ func (a *App) DetectSpeechFragments(videoID string, whisperPath string, modelPat
 		ModelPath:   modelPath,
 	}
 
-	return runner.DetectSpeechFragments(video.Path, video.FrameRate, mergeGapMs, minFragmentMs, a.ffmpegSvc.ExtractAudioWav)
+	return runner.DetectSpeechFragments(video.Path, video.FrameRate, video.Duration, mergeGapMs, minFragmentMs, splitOnSilence, silenceDurationMs, silenceThresholdDb, a.ffmpegSvc.ExtractAudioWav, a.ffmpegSvc.DetectSilences)
 }
 
 func (a *App) ExportSpeechFragments(videoID string, fragments []models.SpeechFragment, outputDir string) ([]models.BatchResult, error) {
