@@ -19,6 +19,7 @@ import (
 type WhisperRunner struct {
 	WhisperPath string
 	ModelPath   string
+	Language    string // e.g. "ru", "en", "auto" or "" (auto-detect)
 }
 
 func (w *WhisperRunner) TranscribeSegments(inputVideoPath string, extractAudio func(inputPath, outputWavPath string) error) ([]models.TranscriptSegment, error) {
@@ -40,7 +41,7 @@ func (w *WhisperRunner) TranscribeSegments(inputVideoPath string, extractAudio f
 		return nil, err
 	}
 
-	rawOutput, err := w.runWhisperCli(wavPath)
+	rawOutput, err := w.runWhisperCli(wavPath, false)
 	if err != nil {
 		return nil, err
 	}
@@ -60,6 +61,42 @@ func (w *WhisperRunner) TranscribeSegments(inputVideoPath string, extractAudio f
 			EndSec:   s.EndSec,
 			Text:     s.Text,
 		})
+	}
+
+	// If language is set and not English, run a second pass with --translate to get English
+	lang := strings.TrimSpace(strings.ToLower(w.Language))
+	if lang != "" && lang != "auto" && lang != "en" {
+		log.Printf("[WHISPER] running English translation pass (--translate)")
+		enOutput, enErr := w.runWhisperCli(wavPath, true)
+		if enErr != nil {
+			log.Printf("[WHISPER] translation pass failed: %v (continuing without English text)", enErr)
+		} else {
+			enSegments, enParseErr := parseWhisperTimestampedOutput(enOutput)
+			if enParseErr != nil {
+				log.Printf("[WHISPER] failed to parse translation output: %v", enParseErr)
+			} else {
+				// Match English segments to original segments by time overlap
+				for i := range out {
+					var bestOverlap float64
+					var bestText string
+					for _, es := range enSegments {
+						oStart := out[i].StartSec
+						if es.StartSec > oStart {
+							oStart = es.StartSec
+						}
+						oEnd := out[i].EndSec
+						if es.EndSec < oEnd {
+							oEnd = es.EndSec
+						}
+						if overlap := oEnd - oStart; overlap > bestOverlap {
+							bestOverlap = overlap
+							bestText = es.Text
+						}
+					}
+					out[i].TextEnglish = bestText
+				}
+			}
+		}
 	}
 
 	return out, nil
@@ -127,10 +164,11 @@ func (w *WhisperRunner) DetectSpeechFragments(
 	fragments := make([]models.SpeechFragment, len(merged))
 	for i := range merged {
 		fragments[i] = models.SpeechFragment{
-			ID:       uuid.NewString(),
-			StartSec: merged[i].StartSec,
-			EndSec:   merged[i].EndSec,
-			Text:     merged[i].Text,
+			ID:          uuid.NewString(),
+			StartSec:    merged[i].StartSec,
+			EndSec:      merged[i].EndSec,
+			Text:        merged[i].Text,
+			TextEnglish: merged[i].TextEnglish,
 		}
 		fragments[i].InFrame = int64(fragments[i].StartSec * frameRate)
 		fragments[i].OutFrame = int64(fragments[i].EndSec*frameRate) + 1
@@ -142,12 +180,15 @@ func (w *WhisperRunner) DetectSpeechFragments(
 	return fragments, nil
 }
 
-func (w *WhisperRunner) runWhisperCli(wavPath string) (string, error) {
-	cmd := exec.Command(
-		w.WhisperPath,
-		"-m", w.ModelPath,
-		"-f", wavPath,
-	)
+func (w *WhisperRunner) runWhisperCli(wavPath string, translate bool) (string, error) {
+	args := []string{"-m", w.ModelPath, "-f", wavPath}
+	if w.Language != "" && w.Language != "auto" {
+		args = append(args, "--language", w.Language)
+	}
+	if translate {
+		args = append(args, "--translate")
+	}
+	cmd := exec.Command(w.WhisperPath, args...)
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow: true,
@@ -405,9 +446,10 @@ func speechRegionsFromSilences(silences []ffmpeg.SilencePeriod, whisperSegments 
 		log.Printf("[SPEECH]   region %d: %.3f → %.3f (%.3fs)", i, r.StartSec, r.EndSec, r.EndSec-r.StartSec)
 	}
 
-	// Assign Whisper text to each region by finding overlapping segments
+	// Assign Whisper text (and English translation) to each region by finding overlapping segments
 	for i := range regions {
 		var texts []string
+		var textsEn []string
 		for _, ws := range whisperSegments {
 			overlapStart := ws.StartSec
 			if regions[i].StartSec > overlapStart {
@@ -418,13 +460,16 @@ func speechRegionsFromSilences(silences []ffmpeg.SilencePeriod, whisperSegments 
 				overlapEnd = regions[i].EndSec
 			}
 			if overlapEnd > overlapStart+0.01 {
-				text := strings.TrimSpace(ws.Text)
-				if text != "" {
+				if text := strings.TrimSpace(ws.Text); text != "" {
 					texts = append(texts, text)
+				}
+				if textEn := strings.TrimSpace(ws.TextEnglish); textEn != "" {
+					textsEn = append(textsEn, textEn)
 				}
 			}
 		}
 		regions[i].Text = strings.Join(texts, " ")
+		regions[i].TextEnglish = strings.Join(textsEn, " ")
 	}
 
 	// Filter by minimum duration

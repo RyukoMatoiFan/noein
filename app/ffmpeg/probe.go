@@ -84,14 +84,45 @@ func (p *ProbeService) GetVideoMetadata(videoPath string) (*models.VideoFile, er
 		}
 	}
 
-	if videoStream == nil {
-		return nil, fmt.Errorf("no video stream found in %s", videoPath)
-	}
-
 	// Parse duration
 	duration, err := strconv.ParseFloat(probeData.Format.Duration, 64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse duration: %w", err)
+	}
+
+	// Parse bit rate (from format level)
+	var bitRate int64
+	if probeData.Format.BitRate != "" {
+		bitRate, _ = strconv.ParseInt(probeData.Format.BitRate, 10, 64)
+	}
+
+	// Audio-only file: no video stream
+	if videoStream == nil {
+		// Find audio stream for codec info
+		audioCodec := "audio"
+		for i := range probeData.Streams {
+			if probeData.Streams[i].CodecType == "audio" {
+				audioCodec = probeData.Streams[i].CodecName
+				if ab := probeData.Streams[i].BitRate; ab != "" {
+					bitRate, _ = strconv.ParseInt(ab, 10, 64)
+				}
+				break
+			}
+		}
+
+		// Use a synthetic frame rate so the timeline/frame math still works
+		const syntheticFPS = 25.0
+		return &models.VideoFile{
+			ID:          uuid.New().String(),
+			Path:        videoPath,
+			Name:        filepath.Base(videoPath),
+			Duration:    duration,
+			FrameRate:   syntheticFPS,
+			TotalFrames: int64(duration * syntheticFPS),
+			Codec:       audioCodec,
+			BitRate:     bitRate,
+			AudioOnly:   true,
+		}, nil
 	}
 
 	// Parse frame rate (handle fraction format like "30000/1001")
@@ -107,12 +138,8 @@ func (p *ProbeService) GetVideoMetadata(videoPath string) (*models.VideoFile, er
 	// Calculate total frames
 	totalFrames := int64(duration * frameRate)
 
-	// Parse bit rate
-	var bitRate int64
 	if videoStream.BitRate != "" {
 		bitRate, _ = strconv.ParseInt(videoStream.BitRate, 10, 64)
-	} else if probeData.Format.BitRate != "" {
-		bitRate, _ = strconv.ParseInt(probeData.Format.BitRate, 10, 64)
 	}
 
 	return &models.VideoFile{

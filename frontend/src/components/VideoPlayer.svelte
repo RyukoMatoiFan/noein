@@ -40,6 +40,12 @@ async function loadCurrentFrame(frameNum) {
     if (!$currentVideo) return;
     requestedFrame = frameNum;
 
+    // Audio-only files have no video frames to extract
+    if ($currentVideo.audioOnly) {
+        currentFrameImage = null;
+        return;
+    }
+
     try {
         const frame = await GetFrame($currentVideo.id, frameNum);
         currentFrameImage = frame.imageData;
@@ -598,7 +604,20 @@ function formatTimecode(frame, frameRate) {
         on:mousemove={!$cropEnabled && !$isPlaying ? handleVideoHover : null}
         on:mouseleave={handleVideoLeave}
     >
-        {#if $currentVideo}
+        {#if $currentVideo && $currentVideo.audioOnly}
+            <div class="audio-placeholder">
+                <!-- HTML5 audio element for playback -->
+                <video
+                    bind:this={videoElement}
+                    bind:muted={isMuted}
+                    class="hidden"
+                    on:ended={stopPlayback}
+                ></video>
+                <div class="audio-icon">&#9835;</div>
+                <div class="audio-name">{$currentVideo.name}</div>
+                <div class="audio-duration">{timecode}</div>
+            </div>
+        {:else if $currentVideo}
             <div class="image-container">
                 <!-- HTML5 video element for smooth playback (always in DOM, hidden when not playing) -->
                 <video
@@ -783,6 +802,39 @@ function formatTimecode(frame, frameRate) {
     max-height: 100%;
     width: 100%;
     height: 100%;
+}
+
+.audio-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    color: var(--text-secondary);
+    gap: 12px;
+}
+
+.audio-icon {
+    font-size: 64px;
+    opacity: 0.4;
+}
+
+.audio-name {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-primary);
+    max-width: 80%;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.audio-duration {
+    font-size: 24px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    color: var(--text-secondary);
 }
 
 .frame-image {

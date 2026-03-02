@@ -36,6 +36,12 @@ func (vm *VideoManager) LoadFolder(folderPath string) ([]*models.VideoFile, erro
 		".avi":  true,
 		".mkv":  true,
 		".webm": true,
+		".mp3":  true,
+		".wav":  true,
+		".flac": true,
+		".aac":  true,
+		".m4a":  true,
+		".ogg":  true,
 	}
 
 	// Collect video paths

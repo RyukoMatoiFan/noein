@@ -73,6 +73,7 @@ func (a *App) SelectVideoFile() (string, error) {
 		Title: "Select Video File",
 		Filters: []runtime.FileFilter{
 			{DisplayName: "Video Files", Pattern: "*.mp4;*.mov;*.avi;*.mkv;*.webm"},
+			{DisplayName: "Audio Files", Pattern: "*.mp3;*.wav;*.flac;*.aac;*.m4a;*.ogg"},
 		},
 	})
 	return file, err
@@ -1127,10 +1128,11 @@ func (a *App) GetProjectState() *models.ProjectState {
 // SelectOutputFile shows a save file dialog
 func (a *App) SelectOutputFile() (string, error) {
 	file, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "Save Exported Video",
+		Title:           "Save Exported Segment",
 		DefaultFilename: "output.mp4",
 		Filters: []runtime.FileFilter{
 			{DisplayName: "MP4 Video", Pattern: "*.mp4"},
+			{DisplayName: "WAV Audio", Pattern: "*.wav"},
 		},
 	})
 	return file, err
@@ -1174,11 +1176,20 @@ func (a *App) SelectOutputDirectory() (string, error) {
 
 // ExportSegment exports a video segment from inFrame to outFrame
 func (a *App) ExportSegment(videoID string, inFrame, outFrame int64, outputPath string) error {
+	video, err := a.videoManager.GetVideo(videoID)
+	if err != nil {
+		return fmt.Errorf("failed to get video: %w", err)
+	}
+	if video.AudioOnly {
+		startSec := float64(inFrame) / video.FrameRate
+		endSec := float64(outFrame) / video.FrameRate
+		return a.ffmpegSvc.CutAudio(video.Path, startSec, endSec, outputPath)
+	}
 	// Default to re-encode for frame-perfect cutting
 	return a.cutter.CutVideo(videoID, inFrame, outFrame, outputPath, true)
 }
 
-func (a *App) DetectSpeechFragments(videoID string, whisperPath string, modelPath string, mergeGapMs int, minFragmentMs int, splitOnSilence bool, silenceDurationMs int, silenceThresholdDb int) ([]models.SpeechFragment, error) {
+func (a *App) DetectSpeechFragments(videoID string, whisperPath string, modelPath string, mergeGapMs int, minFragmentMs int, splitOnSilence bool, silenceDurationMs int, silenceThresholdDb int, language string) ([]models.SpeechFragment, error) {
 	video, err := a.videoManager.GetVideo(videoID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get video: %w", err)
@@ -1196,6 +1207,7 @@ func (a *App) DetectSpeechFragments(videoID string, whisperPath string, modelPat
 	runner := &speech.WhisperRunner{
 		WhisperPath: whisperPath,
 		ModelPath:   modelPath,
+		Language:    language,
 	}
 
 	return runner.DetectSpeechFragments(video.Path, video.FrameRate, video.Duration, mergeGapMs, minFragmentMs, splitOnSilence, silenceDurationMs, silenceThresholdDb, a.ffmpegSvc.ExtractAudioWav, a.ffmpegSvc.DetectSilences)
@@ -1256,8 +1268,12 @@ func (a *App) ExportSpeechDataset(videoID string, fragments []models.SpeechFragm
 		return nil, fmt.Errorf("failed to get video: %w", err)
 	}
 
+	// For audio-only files, export as .wav; otherwise keep original extension
 	ext := filepath.Ext(video.Path)
-	base := strings.TrimSuffix(filepath.Base(video.Path), ext)
+	if video.AudioOnly {
+		ext = ".wav"
+	}
+	base := strings.TrimSuffix(filepath.Base(video.Path), filepath.Ext(video.Path))
 	base = sanitizeFileName(base)
 
 	type datasetItem struct {
@@ -1310,12 +1326,18 @@ func (a *App) ExportSpeechDataset(videoID string, fragments []models.SpeechFragm
 			Success:         true,
 		}
 
-		if err := a.cutter.CutVideo(videoID, f.InFrame, f.OutFrame, outputPath, true); err != nil {
+		var cutErr error
+		if video.AudioOnly {
+			cutErr = a.ffmpegSvc.CutAudio(video.Path, f.StartSec, f.EndSec, outputPath)
+		} else {
+			cutErr = a.cutter.CutVideo(videoID, f.InFrame, f.OutFrame, outputPath, true)
+		}
+		if cutErr != nil {
 			result.Success = false
-			result.Error = err.Error()
+			result.Error = cutErr.Error()
 			result.Output = ""
 			item.Success = false
-			item.Error = err.Error()
+			item.Error = cutErr.Error()
 			item.ClipPath = ""
 		}
 
@@ -1327,6 +1349,96 @@ func (a *App) ExportSpeechDataset(videoID string, fragments []models.SpeechFragm
 	}
 
 	return results, nil
+}
+
+// ExportSpeechAudioDataset exports fragments as WAV audio clips (from any source — video or audio).
+func (a *App) ExportSpeechAudioDataset(videoID string, fragments []models.SpeechFragment, outputDir string, manifestName string) ([]models.BatchResult, error) {
+	if strings.TrimSpace(manifestName) == "" {
+		manifestName = "dataset.jsonl"
+	}
+	if strings.TrimSpace(outputDir) == "" {
+		return nil, fmt.Errorf("output directory is required")
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output dir: %w", err)
+	}
+
+	video, err := a.videoManager.GetVideo(videoID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get video: %w", err)
+	}
+
+	base := strings.TrimSuffix(filepath.Base(video.Path), filepath.Ext(video.Path))
+	base = sanitizeFileName(base)
+
+	type transcriptEntry struct {
+		Index       int      `json:"index"`
+		StartSec    float64  `json:"startSec"`
+		EndSec      float64  `json:"endSec"`
+		Start       string   `json:"start"`
+		End         string   `json:"end"`
+		AudioFile   string   `json:"audioFile"`
+		Text        string   `json:"text"`
+		TextEnglish string   `json:"textEnglish,omitempty"`
+		Label       string   `json:"label,omitempty"`
+		Tags        []string `json:"tags,omitempty"`
+	}
+
+	results := make([]models.BatchResult, len(fragments))
+	var transcript []transcriptEntry
+
+	for i, f := range fragments {
+		outputName := fmt.Sprintf("%s_speech_%03d.wav", base, i+1)
+		outputPath := filepath.Join(outputDir, outputName)
+
+		result := models.BatchResult{
+			VideoID: videoID,
+			Success: true,
+			Output:  outputPath,
+		}
+
+		entry := transcriptEntry{
+			Index:       i + 1,
+			StartSec:    f.StartSec,
+			EndSec:      f.EndSec,
+			Start:       formatSRTTime(f.StartSec),
+			End:         formatSRTTime(f.EndSec),
+			AudioFile:   outputName,
+			Text:        f.Text,
+			TextEnglish: f.TextEnglish,
+			Label:       f.Label,
+			Tags:        f.Tags,
+		}
+
+		if cutErr := a.ffmpegSvc.CutAudio(video.Path, f.StartSec, f.EndSec, outputPath); cutErr != nil {
+			result.Success = false
+			result.Error = cutErr.Error()
+			result.Output = ""
+		}
+
+		transcript = append(transcript, entry)
+		results[i] = result
+	}
+
+	// Write combined transcript JSON
+	transcriptPath := filepath.Join(outputDir, strings.TrimSuffix(manifestName, filepath.Ext(manifestName))+".json")
+	transcriptJSON, err := json.MarshalIndent(transcript, "", "  ")
+	if err != nil {
+		return results, fmt.Errorf("failed to marshal transcript: %w", err)
+	}
+	if err := os.WriteFile(transcriptPath, transcriptJSON, 0644); err != nil {
+		return results, fmt.Errorf("failed to write transcript: %w", err)
+	}
+
+	return results, nil
+}
+
+func formatSRTTime(sec float64) string {
+	h := int(sec) / 3600
+	m := (int(sec) % 3600) / 60
+	s := int(sec) % 60
+	ms := int((sec - float64(int(sec))) * 1000)
+	return fmt.Sprintf("%02d:%02d:%02d,%03d", h, m, s, ms)
 }
 
 func (a *App) ExportWhisperTranscript(videoID string, whisperPath string, modelPath string, format string, outputDir string) (string, error) {

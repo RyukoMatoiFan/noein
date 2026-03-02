@@ -238,11 +238,17 @@ function formatFrameRate(fps) {
                             <div class="video-details">
                                 <div class="video-name">{video.name}</div>
                                 <div class="video-info">
-                                    <span>{formatResolution(video.width, video.height)}</span>
+                                    {#if video.audioOnly}
+                                        <span class="audio-badge">audio</span>
+                                    {:else}
+                                        <span>{formatResolution(video.width, video.height)}</span>
+                                    {/if}
                                     <span>•</span>
                                     <span>{formatDuration(video.duration)}</span>
-                                    <span>•</span>
-                                    <span>{formatFrameRate(video.frameRate)}</span>
+                                    {#if !video.audioOnly}
+                                        <span>•</span>
+                                        <span>{formatFrameRate(video.frameRate)}</span>
+                                    {/if}
                                 </div>
                             </div>
                         </div>
@@ -508,5 +514,15 @@ function formatFrameRate(fps) {
     gap: 6px;
     font-family: 'Consolas', 'Monaco', monospace;
     align-items: center;
+}
+
+.audio-badge {
+    background: rgba(81, 207, 102, 0.15);
+    color: #51cf66;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
 }
 </style>

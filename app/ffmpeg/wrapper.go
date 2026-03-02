@@ -109,6 +109,32 @@ func parseSilenceDetectOutput(output string) []SilencePeriod {
 	return periods
 }
 
+// CutAudio extracts an audio segment by time range. Output format is inferred from outputPath extension.
+func (f *FFmpegService) CutAudio(inputPath string, startSec, endSec float64, outputPath string) error {
+	args := []string{
+		"-i", inputPath,
+		"-ss", fmt.Sprintf("%.6f", startSec),
+		"-to", fmt.Sprintf("%.6f", endSec),
+		"-vn",
+		"-c:a", "pcm_s16le",
+		"-ac", "1",
+		"-ar", "16000",
+		"-y",
+		outputPath,
+	}
+
+	cmd := exec.Command(f.ffmpegPath, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg audio cut failed: %w (stderr: %s)", err, errBuf.String())
+	}
+	return nil
+}
+
 // ExtractFrame extracts a single frame at the specified frame number
 func (f *FFmpegService) ExtractFrame(videoPath string, frameNumber int64, frameRate float64) ([]byte, error) {
 	// Calculate timestamp from frame number

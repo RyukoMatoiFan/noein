@@ -11,4 +11,5 @@ type VideoFile struct {
 	Height      int     `json:"height"`
 	Codec       string  `json:"codec"`
 	BitRate     int64   `json:"bitRate"`
+	AudioOnly   bool    `json:"audioOnly"`
 }

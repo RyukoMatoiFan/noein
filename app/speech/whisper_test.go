@@ -32,7 +32,7 @@ func TestMergeTranscriptSegments(t *testing.T) {
 		{StartSec: 5.0, EndSec: 6.0, Text: "again"},
 	}
 
-	merged := mergeTranscriptSegments(segments, 0.5, 0.0)
+	merged := mergeTranscriptSegments(segments, 0.5, 0.0, nil)
 	if len(merged) != 2 {
 		t.Fatalf("expected 2 merged segments, got %d", len(merged))
 	}

@@ -1,11 +1,12 @@
 <script>
 import { currentVideo, currentFrame, isPlaying, playbackEndFrame, videoList } from '../stores/videoStore.js';
 import { inPoint, outPoint } from '../stores/projectStore.js';
-import { DetectSpeechFragments, ExportSegment, ExportSpeechDataset, ExportWhisperTranscript, EnsureWhisperCLI, EnsureWhisperModel, OllamaAnnotateSpeechFragments, OllamaListModels, SelectOutputDirectory, SelectOutputFile, SelectWhisperExecutable, SelectWhisperModel, SetInPoint, SetOutPoint } from '../../wailsjs/go/app/App.js';
+import { DetectSpeechFragments, ExportSegment, ExportSpeechDataset, ExportSpeechAudioDataset, ExportWhisperTranscript, EnsureWhisperCLI, EnsureWhisperModel, OllamaAnnotateSpeechFragments, OllamaListModels, SelectOutputDirectory, SelectOutputFile, SelectWhisperExecutable, SelectWhisperModel, SetInPoint, SetOutPoint } from '../../wailsjs/go/app/App.js';
 
 let fragments = [];
 let isAnalyzing = false;
 let isExportingAll = false;
+let isExportingAudio = false;
 let isDownloading = false;
 let isExportingTranscript = false;
 let isLoadingOllamaModels = false;
@@ -26,6 +27,7 @@ let silenceDurationMs = Number(localStorage.getItem('noein.whisperSilenceDuratio
 // Reset any stale threshold; FFmpeg default is -60dB
 let _storedThresh = localStorage.getItem('noein.whisperSilenceThresholdDb');
 let silenceThresholdDb = (_storedThresh === null || _storedThresh === '-20' || _storedThresh === '-30') ? -50 : Number(_storedThresh);
+let whisperLanguage = localStorage.getItem('noein.whisperLanguage') || 'auto';
 
 let ollamaBaseURL = localStorage.getItem('noein.ollamaBaseURL') || 'http://localhost:11434';
 let ollamaModel = localStorage.getItem('noein.ollamaModel') || '';
@@ -42,6 +44,7 @@ $: localStorage.setItem('noein.whisperMinFragmentMs', String(minFragmentMs || 0)
 $: localStorage.setItem('noein.whisperSplitOnSilence', String(splitOnSilence));
 $: localStorage.setItem('noein.whisperSilenceDurationMs', String(silenceDurationMs || 0));
 $: localStorage.setItem('noein.whisperSilenceThresholdDb', String(silenceThresholdDb || -30));
+$: localStorage.setItem('noein.whisperLanguage', whisperLanguage || 'auto');
 
 function formatTime(seconds) {
     const s = Math.max(0, seconds || 0);
@@ -91,7 +94,7 @@ async function analyze() {
     fragments = [];
     isAnalyzing = true;
     try {
-        fragments = await DetectSpeechFragments($currentVideo.id, whisperPath, modelPath, mergeGapMs, minFragmentMs, splitOnSilence, silenceDurationMs, silenceThresholdDb);
+        fragments = await DetectSpeechFragments($currentVideo.id, whisperPath, modelPath, mergeGapMs, minFragmentMs, splitOnSilence, silenceDurationMs, silenceThresholdDb, whisperLanguage);
     } catch (e) {
         errorMessage = e?.message || String(e);
     } finally {
@@ -153,6 +156,25 @@ async function exportAll() {
         errorMessage = e?.message || String(e);
     } finally {
         isExportingAll = false;
+    }
+}
+
+async function exportAudioAll() {
+    if (!$currentVideo || fragments.length === 0) return;
+    errorMessage = '';
+    isExportingAudio = true;
+    try {
+        const outputDir = await SelectOutputDirectory();
+        if (!outputDir) return;
+        const results = await ExportSpeechAudioDataset($currentVideo.id, fragments, outputDir, manifestName);
+        const failures = results.filter(r => !r.success);
+        if (failures.length > 0) {
+            errorMessage = `Exported with ${failures.length} failures. First error: ${failures[0].error || 'unknown'}`;
+        }
+    } catch (e) {
+        errorMessage = e?.message || String(e);
+    } finally {
+        isExportingAudio = false;
     }
 }
 
@@ -219,7 +241,7 @@ async function batchExtractAll() {
 
             const result = { name: v.name, success: false, fragmentCount: 0, error: '' };
             try {
-                const frags = await DetectSpeechFragments(v.id, whisperPath, modelPath, mergeGapMs, minFragmentMs, splitOnSilence, silenceDurationMs, silenceThresholdDb);
+                const frags = await DetectSpeechFragments(v.id, whisperPath, modelPath, mergeGapMs, minFragmentMs, splitOnSilence, silenceDurationMs, silenceThresholdDb, whisperLanguage);
                 result.fragmentCount = frags ? frags.length : 0;
 
                 if (frags && frags.length > 0) {
@@ -266,6 +288,30 @@ async function batchExtractAll() {
             <option value="medium">medium (multilingual, slow)</option>
             <option value="medium.en">medium.en (English, slow)</option>
         </select>
+    </div>
+
+    <div class="row">
+        <label>
+            <div class="label">Language</div>
+            <select class="select" bind:value={whisperLanguage}>
+                <option value="auto">auto-detect</option>
+                <option value="en">English</option>
+                <option value="ru">Russian</option>
+                <option value="uk">Ukrainian</option>
+                <option value="de">German</option>
+                <option value="fr">French</option>
+                <option value="es">Spanish</option>
+                <option value="it">Italian</option>
+                <option value="pt">Portuguese</option>
+                <option value="zh">Chinese</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="ar">Arabic</option>
+                <option value="hi">Hindi</option>
+                <option value="pl">Polish</option>
+                <option value="tr">Turkish</option>
+            </select>
+        </label>
     </div>
 
     <div class="grid">
@@ -318,6 +364,9 @@ async function batchExtractAll() {
         </button>
         <button class="btn" on:click={exportAll} disabled={!$currentVideo || fragments.length === 0 || isExportingAll}>
             {isExportingAll ? 'Exporting…' : `Export All (${fragments.length})`}
+        </button>
+        <button class="btn" on:click={exportAudioAll} disabled={!$currentVideo || fragments.length === 0 || isExportingAudio}>
+            {isExportingAudio ? 'Exporting…' : `Export Audio (${fragments.length})`}
         </button>
     </div>
 
@@ -386,6 +435,9 @@ async function batchExtractAll() {
                     <div class="meta">
                         <div class="time">{formatTime(f.startSec)} → {formatTime(f.endSec)}</div>
                         <div class="text">{f.text}</div>
+                        {#if f.textEnglish}
+                            <div class="text-en">{f.textEnglish}</div>
+                        {/if}
                         {#if f.label}
                             <div class="ollama-label">{f.label}</div>
                         {/if}
@@ -577,6 +629,14 @@ input {
     color: var(--text-primary);
     word-break: break-word;
     line-height: 1.2;
+}
+
+.text-en {
+    font-size: 11px;
+    color: var(--text-secondary);
+    word-break: break-word;
+    line-height: 1.2;
+    font-style: italic;
 }
 
 .actions {
